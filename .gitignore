@@ -1,0 +1,5 @@
+.DS_Store
+build/
+# дамп БКРС (~96 МБ) — скачивается с https://bkrs.info/p47
+data/raw/dabkrs.gz
+__pycache__/
