@@ -1,0 +1,35 @@
+# Релиз по тегу: git tag v1.1 && git push origin v1.1
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Версия из тега
+        run: |
+          plutil -replace CFBundleShortVersionString -string "${GITHUB_REF_NAME#v}" Resources/Info.plist
+          plutil -replace CFBundleVersion -string "$GITHUB_RUN_NUMBER" Resources/Info.plist
+
+      - name: Сборка
+        run: ./build.sh
+
+      - name: Архив
+        # ditto сохраняет структуру бандла и подпись, в отличие от zip
+        run: ditto -c -k --sequesterRsrc --keepParent "build/Hanyu HSK.saver" Hanyu-HSK.saver.zip
+
+      - name: Релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" Hanyu-HSK.saver.zip \
+            --title "Hanyu HSK $GITHUB_REF_NAME" \
+            --notes-file .github/release-notes.md
