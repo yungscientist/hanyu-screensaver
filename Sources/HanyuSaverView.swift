@@ -36,6 +36,24 @@ let levelColors: [String: NSColor] = [
     "7": NSColor(srgbRed: 0.69, green: 0.66, blue: 0.93, alpha: 1),
 ]
 
+/// Детерминированный генератор: одно зерно даёт одну колоду во всех процессах legacyScreenSaver.
+struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: String) {
+        // FNV-1a: Hasher в Swift засеивается случайно в каждом процессе
+        state = seed.utf8.reduce(0xcbf2_9ce4_8422_2325) { ($0 ^ UInt64($1)) &* 0x100_0000_01b3 }
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9e37_79b9_7f4a_7c15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xbf58_476d_1ce4_e5b9
+        z = (z ^ (z >> 27)) &* 0x94d0_49bb_1331_11eb
+        return z ^ (z >> 31)
+    }
+}
+
 // MARK: - Настройки
 
 final class Settings {
@@ -50,6 +68,7 @@ final class Settings {
             "duration": 8.0,
             "meanings": 3,
             "examples": true,
+            "perDisplay": false,
         ])
     }
 
@@ -73,6 +92,11 @@ final class Settings {
         get { defaults.bool(forKey: "examples") }
         set { defaults.set(newValue, forKey: "examples") }
     }
+    /// false — одно слово на всех дисплеях со сменой по часам, true — своя колода у каждого
+    var perDisplay: Bool {
+        get { defaults.bool(forKey: "perDisplay") }
+        set { defaults.set(newValue, forKey: "perDisplay") }
+    }
 
     func save() { defaults.synchronize() }
 }
@@ -88,6 +112,13 @@ final class HanyuSaverView: ScreenSaverView {
     private var current: (level: String, word: Word)?
     private var shownAt = Date.distantPast
     private var offset = CGPoint.zero
+    private let startedAt = Date()
+    // общий режим: все слова выбранных уровней в фиксированном порядке и перестановка текущего круга
+    private var pool: [(level: String, word: Word)] = []
+    private var poolKey = ""
+    private var order: [Int] = []
+    private var orderCycle = -1
+    private var slot = -1
     // статическое: legacyScreenSaver может пересоздать вид, пока лист открыт
     private static var sheetController: ConfigSheetController?
 
@@ -119,26 +150,61 @@ final class HanyuSaverView: ScreenSaverView {
         deck = []
         current = nil
         shownAt = .distantPast
+        poolKey = ""
+        orderCycle = -1
+        slot = -1
     }
 
+    /// Слова выбранных уровней. Уровни сортируются: порядок обхода Set разный в разных процессах.
+    private func selectedWords() -> (key: String, words: [(level: String, word: Word)]) {
+        let system = settings.system
+        var levels = settings.levels.intersection(system.levels)
+        if levels.isEmpty { levels = ["1"] }
+        let sorted = levels.sorted()
+        let byLevel = loadBase()?.systems[system.rawValue] ?? [:]
+        let words = sorted.flatMap { lvl in (byLevel[lvl] ?? []).map { (lvl, $0) } }
+        return ("\(system.rawValue):\(sorted.joined(separator: ","))", words)
+    }
+
+    // Свой режим: случайная колода без повторов, смена по своему таймеру
     private func nextWord() {
-        if deck.isEmpty, let base = loadBase() {
-            let system = settings.system
-            var levels = settings.levels.intersection(system.levels)
-            if levels.isEmpty { levels = ["1"] }
-            let byLevel = base.systems[system.rawValue] ?? [:]
-            deck = levels.flatMap { lvl in (byLevel[lvl] ?? []).map { (lvl, $0) } }.shuffled()
-        }
+        if deck.isEmpty { deck = selectedWords().words.shuffled() }
         current = deck.popLast()
         shownAt = Date()
         // небольшой сдвиг карточки, чтобы текст не «выжигался» в одном месте
         offset = CGPoint(x: .random(in: -0.04...0.04), y: .random(in: -0.04...0.04))
     }
 
+    // Общий режим: номер слайда считается от часов, колода тасуется по зерну,
+    // поэтому все дисплеи без связи между собой показывают одно слово и меняют его одновременно
+    private func show(slot: Int, period: TimeInterval) {
+        let selected = selectedWords()
+        if selected.key != poolKey {
+            pool = selected.words
+            poolKey = selected.key
+            orderCycle = -1
+        }
+        self.slot = slot
+        guard !pool.isEmpty else { current = nil; return }
+        let cycle = slot / pool.count
+        if cycle != orderCycle {
+            var rng = SplitMix64(seed: "\(poolKey)#\(cycle)")
+            order = Array(pool.indices).shuffled(using: &rng)
+            orderCycle = cycle
+        }
+        current = pool[order[slot % pool.count]]
+        shownAt = Date(timeIntervalSince1970: Double(slot) * period)
+        var rng = SplitMix64(seed: "\(poolKey)@\(slot)")
+        offset = CGPoint(x: .random(in: -0.04...0.04, using: &rng), y: .random(in: -0.04...0.04, using: &rng))
+    }
+
     override func animateOneFrame() {
         let total = settings.duration + 2 * fade
-        if current == nil || Date().timeIntervalSince(shownAt) >= total {
-            nextWord()
+        if settings.perDisplay {
+            if current == nil || Date().timeIntervalSince(shownAt) >= total { nextWord() }
+        } else {
+            let now = Int((Date().timeIntervalSince1970 / total).rounded(.down))
+            if now != slot || current == nil { show(slot: now, period: total) }
         }
         needsDisplay = true
     }
@@ -153,7 +219,9 @@ final class HanyuSaverView: ScreenSaverView {
 
         let elapsed = Date().timeIntervalSince(shownAt)
         let total = settings.duration + 2 * fade
-        let alpha = CGFloat(min(1, min(elapsed / fade, (total - elapsed) / fade)).clamped(0, 1))
+        // в общем режиме запуск может попасть на середину слайда — тогда карточка проявляется с момента старта
+        let sinceStart = Date().timeIntervalSince(startedAt)
+        let alpha = CGFloat(min(elapsed / fade, (total - elapsed) / fade, sinceStart / fade).clamped(0, 1))
         let color = levelColors[level] ?? .white
         let h = bounds.height
 
@@ -289,6 +357,7 @@ final class ConfigSheetController: NSObject {
     private let durationLabel = NSTextField(labelWithString: "")
     private let meaningsPopup = NSPopUpButton()
     private let examplesBox = NSButton(checkboxWithTitle: "Показывать пример с пиньинем", target: nil, action: nil)
+    private let perDisplayBox = NSButton(checkboxWithTitle: "Разные слова на каждом дисплее", target: nil, action: nil)
 
     init(settings: Settings, onSave: @escaping () -> Void) {
         self.settings = settings
@@ -331,6 +400,7 @@ final class ConfigSheetController: NSObject {
         meaningsPopup.selectItem(at: (settings.meanings - 1).clamped(0, 3))
 
         examplesBox.state = settings.examples ? .on : .off
+        perDisplayBox.state = settings.perDisplay ? .on : .off
 
         let cancel = NSButton(title: "Отмена", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
@@ -348,6 +418,7 @@ final class ConfigSheetController: NSObject {
             row("Время на слово:", NSStackView(views: [durationSlider, durationLabel])),
             row("Значений:", meaningsPopup),
             row("", examplesBox),
+            row("", perDisplayBox),
             note,
             buttons,
         ])
@@ -400,6 +471,7 @@ final class ConfigSheetController: NSObject {
         settings.duration = durationSlider.doubleValue.rounded()
         settings.meanings = meaningsPopup.indexOfSelectedItem + 1
         settings.examples = examplesBox.state == .on
+        settings.perDisplay = perDisplayBox.state == .on
         settings.save()
         onSave()
         close()
