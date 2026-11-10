@@ -9,7 +9,46 @@
 
 ## Установка
 
-### Готовая сборка
+### Через Homebrew
+
+Установите из [собственного tap `yungscientist/homebrew-tap`](https://github.com/yungscientist/homebrew-tap) (macOS 13+):
+
+```bash
+brew install --cask yungscientist/tap/hanyu-hsk
+```
+
+Если Homebrew отказывает в загрузке cask из недоверенного tap, проверьте [файл cask](https://github.com/yungscientist/homebrew-tap/blob/main/Casks/hanyu-hsk.rb) и разрешите **только этот cask**, затем повторите установку:
+
+```bash
+brew trust --cask yungscientist/tap/hanyu-hsk
+brew install --cask yungscientist/tap/hanyu-hsk
+```
+
+Не требуется доверять всему tap (`brew trust yungscientist/tap`): такое разрешение охватывает и будущие формулы и cask в нём. Доверие Homebrew разрешает загрузить рецепт установки, **но не снимает карантин macOS**.
+
+Если прежняя версия была установлена вручную из ZIP, до установки через Homebrew переместите прежний `~/Library/Screen Savers/Hanyu HSK.saver` в резервную копию (убедитесь, что файла с таким именем ещё нет):
+
+```bash
+mv "$HOME/Library/Screen Savers/Hanyu HSK.saver" "$HOME/Library/Screen Savers/Hanyu HSK.saver.backup"
+```
+
+Если прежняя версия находится в `/Library/Screen Savers` или установлена через Homebrew, не выполняйте эту команду: сначала определите способ её установки. Homebrew устанавливает новую заставку в `~/Library/Screen Savers/Hanyu HSK.saver`.
+
+Заставка подписана ad-hoc, без Developer ID и нотаризации Apple. Homebrew не обходит Gatekeeper: если macOS блокирует заставку («не удаётся проверить разработчика»), снимите карантин **только с установленного бандла**, если доверяете этому релизу:
+
+```bash
+xattr -dr com.apple.quarantine "$HOME/Library/Screen Savers/Hanyu HSK.saver"
+```
+
+Откройте Системные настройки → Заставка и выберите «Hanyu HSK». После обновления, если macOS снова блокирует заставку, повторите команду снятия карантина для новой версии.
+
+```bash
+brew update
+brew upgrade --cask yungscientist/tap/hanyu-hsk
+brew uninstall --cask yungscientist/tap/hanyu-hsk
+```
+
+### Готовая сборка из ZIP (альтернатива)
 
 1. Скачайте [Hanyu-HSK.saver.zip](https://github.com/yungscientist/hanyu-screensaver/releases/latest/download/Hanyu-HSK.saver.zip) из последнего релиза и распакуйте.
 2. Снимите карантин:
